@@ -3,6 +3,9 @@
 A voice and vision assistant. Say "Jarvis" or "Hey Jarvis", ask anything, and it answers out loud.
 Everything works by voice, including with the screen locked and the phone in your pocket.
 
+**Completely free.** All the AI runs on the iPhone itself. There's no account, no API key, no
+Anthropic or OpenAI service, and no cost per question. After the first download it works offline.
+
 ## Talking to Jarvis
 
 | You say | Jarvis |
@@ -23,26 +26,37 @@ Jarvis starts listening by itself as soon as the app opens; there's nothing to t
 ```
 mic ──► on-device speech recognition ──► hears "Jarvis"? ──► collects your question
                                                                (ends after 1.5 s of silence)
-back camera (live while app is open) ──► newest frame ──┐
-                                                         ▼
-                                   Claude API (vision + reasoning + maths + web search)
-                                     └─ set_reminder tool ──► Apple Reminders
-                                                         │
-                                                         ▼
+                                                                        │
+          time, date, "remind me…" ──► answered in code ◄───────────────┤
+                                                                        │
+  app on screen ──► Qwen3-VL 4B on the iPhone GPU (sees the camera when you ask about it)
+  screen locked ──► Apple Intelligence on-device model (no camera)
+                                                                        │
                         spoken reply (British voice) ──► AirPods if connected, else loudspeaker
 ```
 
-There is no model to train. Claude already understands images, does maths, and answers general
-questions, so the app's job is the plumbing around it: the wake word, the camera, the tools, and
-the voice.
+**Which AI?** Training a vision-language model from scratch takes thousands of GPUs and millions of
+dollars, so Jarvis uses free open-weight models instead. Their weights are published for anyone to
+use and they run locally on your phone:
+
+- **Qwen3-VL 4B** (open-weight, from Alibaba's Qwen team), run with Apple's free MLX library. It
+  understands camera images and handles maths and general questions. It downloads once (about 3 GB,
+  use Wi-Fi) the first time you open Jarvis.
+- **Apple's on-device model**, built into iOS 26 on the iPhone 17 Pro. Jarvis uses it with the screen
+  locked, because iOS doesn't let apps use the GPU in the background. Apple Intelligence must be turned on
+  in Settings.
+
+These are smaller than the big cloud AIs, so expect them to be a little less sharp on hard questions,
+and they can't look things up online (no live news, weather or scores).
 
 | File | Job |
 |---|---|
 | `JarvisEngine.swift` | The loop: wait for wake word, capture question, ask, speak, listen again |
 | `SpeechListener.swift` | Continuous on-device speech recognition; keeps the mic alive when the screen locks |
+| `LocalBrain.swift` | The on-device AI models and conversation memory (5 min) |
+| `LocalSkills.swift` | Time, date and reminders, answered instantly without a model |
 | `SiriShortcuts.swift` | "Hey Siri, start Jarvis" and "Hey Siri, ask Jarvis" |
-| `CameraService.swift` | Keeps the newest back-camera frame; nothing uploads until you ask |
-| `ClaudeClient.swift` | Claude API calls, conversation memory (5 min), tools, web search |
+| `CameraService.swift` | Keeps the newest back-camera frame; it never leaves the phone |
 | `Reminders.swift` | Adds reminders to Apple Reminders |
 | `Speaker.swift` | Text to speech |
 | `AudioRouting.swift` | Audio session: AirPods or speaker, never touches volume |
@@ -71,42 +85,37 @@ the voice.
   picks up listening again on its own.
 - **Battery.** Camera plus continuous speech recognition costs real battery, roughly like recording video.
   Use it in sessions rather than all day.
-- **Cost.** Each question is one or more Claude API calls billed to your API key. A question with a photo
-  costs more than one without.
-- **API key.** For a personal prototype, the key stays in the iPhone Keychain. If you ever ship this to
-  other people, move the Claude call to a small server so the key never leaves your hands.
+- **Memory.** The vision model needs about 3 GB of RAM. If iOS closes Jarvis in the background to free
+  memory, say "Hey Siri, start Jarvis".
+- **Cost.** None. The only download is the model, once.
 
 ## Installing from Windows (no Mac)
 
-1. Push this folder to a GitHub repo (the repo root is this `ios` folder). The **Build iPhone app**
-   workflow runs on GitHub's Macs. Open the Actions tab, pick the latest run, and download
+1. Every push to `main` runs the **Build iPhone app** workflow on GitHub's Macs. Open the Actions tab, pick the latest run, and download
    **Jarvis-ipa** under Artifacts. Unzip it to get `Jarvis.ipa`.
 2. On Windows, install iTunes (the version from apple.com, not the Microsoft Store) and
    [Sideloadly](https://sideloadly.io).
 3. Plug in your iPhone, drag `Jarvis.ipa` into Sideloadly, sign in with your Apple ID, and press Start.
 4. On the iPhone: Settings › General › VPN & Device Management › trust your Apple ID.
    Then Settings › Privacy & Security › Developer Mode › on (the phone restarts).
-5. Open Jarvis, paste your API key, and talk.
+5. Open Jarvis on Wi-Fi and wait for the one-time brain download (shown at the top), then talk.
 
 With a free Apple ID the app stops opening after 7 days. Re-run step 3 to renew it.
 With the paid Apple Developer Program ($99/yr) you can use TestFlight instead, and builds last 90 days.
 
 ## Running it on your iPhone 17 Pro from a Mac
 
-You need a Mac with Xcode 26 or newer, and an Anthropic API key from console.anthropic.com.
+You need a Mac with Xcode 26 or newer.
 
-1. Copy this `ios` folder to your Mac.
+1. Clone this repo on your Mac.
 2. Run `brew install xcodegen`, then `xcodegen` inside the folder. This creates `Jarvis.xcodeproj`.
-   (Without XcodeGen: create a new iOS App project named Jarvis in Xcode, drag the `Jarvis/*.swift`
-   files in, add the four privacy strings and the `audio` background mode from `project.yml`.)
 3. Open `Jarvis.xcodeproj`, choose your team under Signing & Capabilities, plug in your iPhone, and press Run.
-4. On first launch, paste your API key into Settings and allow mic, speech, and camera access.
+4. On first launch, allow mic, speech, and camera access, and wait for the brain download.
 5. Jarvis starts listening right away. Say "Hey Jarvis, what am I looking at?"
 
 ## Settings worth tweaking
 
-- `ClaudeClient.effort`: `"low"` for fast replies; `"medium"` or `"high"` for hard questions (slower).
+- `LocalBrain.visionModel`: swap in another model from MLX's `VLMRegistry`, e.g. `gemma4_E4B_it_4bit`,
+  or a smaller one like `gemma4_E2B_it_4bit` if memory is tight.
 - `JarvisEngine.endOfQuestionSilence`: how long a pause ends your question.
 - `JarvisEngine.yesSirDelay`: how long after a bare "Jarvis" he says "Yes, sir?".
-- The model is `claude-opus-5-5`. Requests opt in to server-side fallbacks (`fallbacks: "default"`),
-  so if a safety check declines a request, the API retries it on another model instead of just refusing.
