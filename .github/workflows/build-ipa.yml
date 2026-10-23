@@ -1,0 +1,39 @@
+# Builds an unsigned Jarvis.ipa on GitHub's Mac machines, so you never need a Mac yourself.
+# Download it from the run's "Artifacts" section, then install it with Sideloadly on Windows,
+# which signs it with your Apple ID.
+name: Build iPhone app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Generate Xcode project
+        run: brew install xcodegen && xcodegen
+
+      - name: Build (unsigned)
+        run: |
+          xcodebuild -project Jarvis.xcodeproj -target Jarvis -configuration Release -sdk iphoneos \
+            SYMROOT="$PWD/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir Payload
+          cp -R build/Release-iphoneos/Jarvis.app Payload/
+          zip -qr Jarvis.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-ipa
+          path: Jarvis.ipa
