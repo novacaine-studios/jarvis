@@ -37,6 +37,8 @@ final class JarvisEngine: ObservableObject {
     @Published private(set) var state: State = .off
     @Published private(set) var heardText = ""
     @Published private(set) var replyText = ""
+    /// Shown while the free vision model downloads on first launch.
+    @Published private(set) var brainStatus = ""
 
     let camera = CameraService()
     private let listener = SpeechListener()
@@ -85,8 +87,27 @@ final class JarvisEngine: ObservableObject {
                 camera.start()
                 try listener.startAudio()
                 resumeListening()
+                loadBrain()
             } catch {
                 replyText = "Couldn't start listening: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func loadBrain() {
+        Task {
+            let ready = await LocalBrain.shared.isVisionModelReady
+            guard !ready else { return }
+            brainStatus = "Downloading Jarvis's brain…"
+            do {
+                try await LocalBrain.shared.prepare { fraction in
+                    Task { @MainActor in
+                        JarvisEngine.shared.brainStatus = "Downloading Jarvis's brain: \(Int(fraction * 100))%"
+                    }
+                }
+                brainStatus = ""
+            } catch {
+                brainStatus = "Couldn't download the brain: \(error.localizedDescription). Reopen the app on Wi-Fi to retry."
             }
         }
     }
@@ -183,17 +204,24 @@ final class JarvisEngine: ObservableObject {
 
         state = .thinking
         replyText = ""
-        let frame = camera.latestJPEG()
+        let inBackground = UIApplication.shared.applicationState == .background
+        let frame = Self.isAboutWhatISee(command) ? camera.latestImage() : nil
 
         let reply: String
         do {
-            reply = try await ClaudeClient.shared.ask(question, cameraJPEG: frame)
+            reply = try await LocalBrain.shared.ask(question, cameraFrame: frame, inBackground: inBackground)
         } catch {
-            reply = "Sorry, sir, I couldn't reach my brain. \(error.localizedDescription)"
+            reply = "Sorry, sir, something went wrong. \(error.localizedDescription)"
         }
         replyText = reply
         await say(reply)
         resumeListening()
+    }
+
+    /// Questions that need the camera, e.g. "what am I looking at", "read this", "what colour is that".
+    private static func isAboutWhatISee(_ command: String) -> Bool {
+        let pattern = #"\b(look|looking|see|seeing|this|that|these|those|here|camera|read|holding|wearing|front of me|colou?r|identify|picture|photo|screen|sign|label)\b"#
+        return command.range(of: pattern, options: .regularExpression) != nil
     }
 
     private func say(_ text: String) async {

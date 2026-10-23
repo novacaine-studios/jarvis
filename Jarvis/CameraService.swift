@@ -9,7 +9,6 @@ final class CameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     private let queue = DispatchQueue(label: "jarvis.camera")
     private let lock = NSLock()
-    private let ciContext = CIContext()
     private var latestFrame: CIImage?
     private var latestFrameAt = Date.distantPast
     private var configured = false
@@ -25,23 +24,13 @@ final class CameraService: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         queue.async { [self] in session.stopRunning() }
     }
 
-    /// The newest frame as a JPEG (longest side 1280px), or nil if the camera isn't live,
-    /// e.g. when the app is in the background, where iOS turns the camera off.
-    func latestJPEG(maxAge: TimeInterval = 3) -> Data? {
+    /// The newest frame, or nil if the camera isn't live, e.g. when the app is in the background,
+    /// where iOS turns the camera off.
+    func latestImage(maxAge: TimeInterval = 3) -> CIImage? {
         lock.lock()
-        let frame = latestFrame
-        let takenAt = latestFrameAt
-        lock.unlock()
-        guard let frame, Date().timeIntervalSince(takenAt) < maxAge else { return nil }
-
-        let longest = max(frame.extent.width, frame.extent.height)
-        let scale = min(1, 1280 / longest)
-        let resized = frame.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        return ciContext.jpegRepresentation(
-            of: resized,
-            colorSpace: CGColorSpaceCreateDeviceRGB(),
-            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.7]
-        )
+        defer { lock.unlock() }
+        guard Date().timeIntervalSince(latestFrameAt) < maxAge else { return nil }
+        return latestFrame
     }
 
     private func configure() {

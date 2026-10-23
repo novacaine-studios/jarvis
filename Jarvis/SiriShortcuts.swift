@@ -16,8 +16,8 @@ struct StartJarvisIntent: AppIntent {
 }
 
 /// "Hey Siri, ask Jarvis": works from the lock screen even when Jarvis isn't running.
-/// Siri says "Yes, sir?", takes your question, and reads out the answer. No camera here,
-/// since iOS doesn't allow it in the background.
+/// Siri says "Yes, sir?", takes your question, and reads out the answer. This uses Apple's
+/// on-device model (Apple Intelligence), since iOS doesn't allow the camera or GPU in the background.
 struct AskJarvisIntent: AppIntent {
     static let title: LocalizedStringResource = "Ask Jarvis"
     static let description = IntentDescription("Ask Jarvis a question and hear the answer.")
@@ -26,7 +26,7 @@ struct AskJarvisIntent: AppIntent {
     var question: String
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let reply = try await ClaudeClient.shared.ask(question, cameraJPEG: nil)
+        let reply = try await LocalBrain.shared.ask(question, cameraFrame: nil, inBackground: true)
         return .result(dialog: "\(reply)")
     }
 }

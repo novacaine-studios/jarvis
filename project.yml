@@ -3,16 +3,47 @@ name: Jarvis
 options:
   bundleIdPrefix: com.example
   deploymentTarget:
-    iOS: "18.0"
+    iOS: "26.0"
 settings:
   base:
     SWIFT_VERSION: "5.0"
     DEVELOPMENT_TEAM: "" # set to your Apple team ID, or pick it in Xcode > Signing
+packages:
+  MLXSwift:
+    url: https://github.com/ml-explore/mlx-swift
+    minorVersion: 0.32.3
+  MLXSwiftLM:
+    url: https://github.com/ml-explore/mlx-swift-lm
+    minorVersion: 3.32.3
+  SwiftHuggingFace:
+    url: https://github.com/huggingface/swift-huggingface
+    from: 0.9.0
+  SwiftTransformers:
+    url: https://github.com/huggingface/swift-transformers
+    from: 1.3.0
 targets:
   Jarvis:
     type: application
     platform: iOS
     sources: [Jarvis]
+    dependencies:
+      - package: MLXSwift
+        product: MLX
+      - package: MLXSwiftLM
+        product: MLXVLM
+      - package: MLXSwiftLM
+        product: MLXLMCommon
+      - package: MLXSwiftLM
+        product: MLXHuggingFace
+      - package: SwiftHuggingFace
+        product: HuggingFace
+      - package: SwiftTransformers
+        product: Tokenizers
+    entitlements:
+      path: Jarvis/Jarvis.entitlements
+      properties:
+        # Lets the on-device model use more of the iPhone's memory.
+        com.apple.developer.kernel.increased-memory-limit: true
     info:
       path: Jarvis/Info.plist
       properties:
@@ -24,3 +55,8 @@ targets:
         NSMicrophoneUsageDescription: Jarvis listens for "Hey Jarvis" and your question.
         NSSpeechRecognitionUsageDescription: Jarvis turns your speech into text on the device.
         NSRemindersFullAccessUsageDescription: Jarvis adds reminders when you ask it to.
+schemes:
+  Jarvis:
+    build:
+      targets:
+        Jarvis: all
