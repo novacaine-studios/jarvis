@@ -1,7 +1,7 @@
 # Generate the Xcode project with:  brew install xcodegen && xcodegen
 name: Jarvis
 options:
-  bundleIdPrefix: com.example
+  bundleIdPrefix: com.novacainestudios
   deploymentTarget:
     iOS: "26.0"
 settings:
@@ -39,11 +39,6 @@ targets:
         product: HuggingFace
       - package: SwiftTransformers
         product: Tokenizers
-    entitlements:
-      path: Jarvis/Jarvis.entitlements
-      properties:
-        # Lets the on-device model use more of the iPhone's memory.
-        com.apple.developer.kernel.increased-memory-limit: true
     info:
       path: Jarvis/Info.plist
       properties:
