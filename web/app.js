@@ -1,6 +1,7 @@
 // Jarvis for Safari: wake word -> question -> (camera) -> on-device AI -> spoken reply.
 // Jarvis never touches the volume: speech plays at whatever level the phone is set to,
 // through AirPods when they're connected.
+import { PcLink, pcKey } from "./pc-link.js";
 import { addTemplate, correct, forgetVoice, knowsMyVoice, learnCorrection, memory } from "./voice-memory.js";
 
 const $ = (id) => document.getElementById(id);
@@ -45,6 +46,7 @@ function onProgress(which, data) {
 const percent = ({ loaded, total }) => (total ? Math.floor((loaded / total) * 100) : 0);
 
 function showDownloadProgress() {
+  if (pc) return; // nothing downloads when your PC does the work
   const { ears, text, vision } = models;
   const lighter = textChoice === "light" ? " (a lighter one, after Safari ran short of memory)" : "";
   if (!ears.ready) {
@@ -78,9 +80,10 @@ const crashes = (() => {
     return {};
   }
 })();
-const textChoice = crashes["text-full"] ? "light" : "full";
+const textChoice = crashes["text-full"] && !pcKey ? "light" : "full";
 
 function startedLoading(stage) {
+  if (pcKey) return;
   try {
     localStorage.setItem(LOADING_KEY, stage);
   } catch {}
@@ -103,7 +106,7 @@ let nextId = 1;
 
 function startBrain() {
   if (worker) return;
-  worker = new Worker("./worker.js", { type: "module" });
+  worker = pc ? pc.brain : new Worker("./worker.js", { type: "module" });
   worker.addEventListener("message", ({ data }) => {
     if (data.type) {
       onProgress(data.which, data);
@@ -117,7 +120,7 @@ function startBrain() {
   // If the AI engine can't load (e.g. no internet on first use), say so instead of hanging.
   worker.addEventListener("error", (event) => {
     event.preventDefault?.();
-    ui.brain.textContent = "Couldn't load Jarvis's AI engine. Check your internet connection and reload.";
+    if (!pc) ui.brain.textContent = "Couldn't load Jarvis's AI engine. Check your internet connection and reload.";
     for (const request of pending.values()) request.reject(new Error("the AI engine didn't load"));
     pending.clear();
   });
@@ -178,10 +181,31 @@ let chunker = null;
 let mic = null; // { stream, source }
 let wantMic = false;
 
+// ---------- Running on your PC (see pc-link.js) ----------
+
+const pc = pcKey
+  ? new PcLink({
+      onStatus: (text) => (ui.brain.textContent = text),
+      onConnect: () => {
+        // The PC starts fresh each time it connects: tell it what Jarvis knows and what it's doing.
+        sendVoiceMemory();
+        if (state !== "off") setState(state);
+      },
+    })
+  : null;
+
+/** What Jarvis has already learned about your voice, for whatever is doing the listening. */
+function sendVoiceMemory() {
+  if (!ears) return;
+  ears.postMessage({ type: "templates", templates: memory.templates });
+  const words = memory.fixes.flatMap((f) => f.to.split(/\s+/)).filter((w) => w.length > 2);
+  ears.postMessage({ type: "vocab", words: [...new Set(words)] });
+}
+
 function startEarsWorker() {
   if (ears) return;
   startedLoading("ears");
-  ears = new Worker("./ears-worker.js", { type: "module" });
+  ears = pc ? pc.ears : new Worker("./ears-worker.js", { type: "module" });
   ears.addEventListener("message", ({ data }) => {
     if (data.type === "progress" || data.type === "ready") onProgress("ears", data);
     else if (data.type === "error") {
@@ -191,8 +215,9 @@ function startEarsWorker() {
     else if (data.type === "utterance") onUtterance(data);
     else if (data.type === "learned") addTemplate(data.template);
   });
-  // What Jarvis has already learned about your voice.
-  ears.postMessage({ type: "templates", templates: memory.templates });
+  sendVoiceMemory();
+  // The PC's ears are ready as soon as it's connected.
+  if (pc?.open) onProgress("ears", { type: "ready" });
   ears.addEventListener("error", (event) => {
     event.preventDefault?.();
     ui.brain.textContent = "Couldn't load Jarvis's ears. Check your internet connection and reload.";
@@ -475,6 +500,7 @@ function saveFix(event) {
   closeFix();
   if (!meant || meant === text) return;
   learnCorrection(text, meant);
+  sendVoiceMemory();
   // A single recording can be remembered by sound, so the same words in the same voice are heard right.
   if (ids.length === 1) ears?.postMessage({ type: "learn", id: ids[0], text: meant, kind: "phrase" });
   showHeard(meant, ids);
@@ -606,12 +632,12 @@ async function handle(question) {
 
 async function think(question, q) {
   if (SEES.test(q)) {
-    const frame = grabFrame();
+    const frame = grabFrame(pc ? 768 : 512);
     if (!frame) return "I can't see anything, sir. Allow camera access and keep this page open.";
-    if ((crashes.vision ?? 0) >= 2) {
+    if (!pc && (crashes.vision ?? 0) >= 2) {
       return "I'm sorry, sir. My eyes need more memory than Safari gives me on this phone, so I can't see right now.";
     }
-    if (!models.vision.ready) {
+    if (!models.vision.ready && !pc) {
       // The eyes download the first time they're needed, so the brain and ears load faster.
       await say("One moment, sir. Opening my eyes for the first time.");
       setState("thinking");
@@ -761,7 +787,7 @@ async function wake() {
     wakeLock = await navigator.wakeLock?.request("screen");
   } catch {}
 
-  if (!navigator.gpu || !(await navigator.gpu.requestAdapter().catch(() => null))) {
+  if (!pc && (!navigator.gpu || !(await navigator.gpu.requestAdapter().catch(() => null)))) {
     setStatus("This browser has no WebGPU, so Jarvis can't think. Update to iOS 26 or later and use Safari.");
     return;
   }
@@ -801,5 +827,5 @@ document.addEventListener("visibilitychange", async () => {
   } catch {}
   if (state === "waiting" || state === "listening") resumeListening();
 });
-if (textChoice === "light") ui.brain.textContent = "Safari ran out of memory last time, so I'll use a lighter brain. Tap Wake Jarvis to carry on.";
+if (textChoice === "light" && !pc) ui.brain.textContent = "Safari ran out of memory last time, so I'll use a lighter brain. Tap Wake Jarvis to carry on.";
 setState("off");

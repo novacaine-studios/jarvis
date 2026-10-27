@@ -6,6 +6,26 @@ Everything works by voice, including with the screen locked and the phone in you
 **Completely free.** All the AI runs on the iPhone itself. There's no account, no API key, no
 Anthropic or OpenAI service, and no cost per question. After the first download it works offline.
 
+## Jarvis with the brain on your Windows PC (recommended)
+
+Safari limits how much memory a web page may use, so the big models can crash the page. In this mode
+your PC does the listening and thinking with free local models, and the iPhone only streams its
+microphone and camera and speaks the answers.
+
+1. Download this repository (green **Code** button › **Download ZIP**) and unzip it.
+2. Open the `pc` folder and double-click **start-jarvis.bat**. The first time, it installs Python,
+   [Ollama](https://ollama.com) and cloudflared (all free), then asks you to run it again.
+3. The second run downloads the models (about 7 GB, once), then shows a **QR code**. Scan it with the
+   iPhone's Camera app, open the link in Safari, and tap **Wake Jarvis**.
+
+- Keep the window open while you use Jarvis. The PC must be on, but the phone can be anywhere with
+  internet: the free Cloudflare tunnel gives the PC a secure address. The address changes each time you
+  start it, so scan the new code each time. The link has a secret key so only you can use it.
+- Models: Whisper `small.en` (hearing), `qwen3:4b` (questions and maths), `gemma3:4b` (camera).
+  Change them in `pc/jarvis_config.json` (created on first run), e.g. `qwen3:8b` on a strong PC.
+- **Fix** and **Teach Jarvis my voice** work here too, and Whisper is also told the words you've
+  corrected, so it expects them.
+
 ## Jarvis in Safari (no install, no Apple ID)
 
 If installing the app isn't possible, the `web/` folder is a version of Jarvis that runs in Safari.
