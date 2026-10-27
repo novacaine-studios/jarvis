@@ -23,9 +23,7 @@ let vision = null;
 
 function progress(which) {
   return (p) => {
-    if (p.status === "progress" || p.status === "done") {
-      postMessage({ type: "progress", which, file: p.file, loaded: p.loaded ?? 0, total: p.total ?? 0 });
-    }
+    if (p.status === "progress_total") postMessage({ type: "progress", which, loaded: p.loaded, total: p.total });
   };
 }
 
@@ -41,15 +39,18 @@ function loadText() {
   return text;
 }
 
+/** Only loaded the first time you ask about the camera, to keep memory low (Safari reloads pages that use too much). */
 function loadVision() {
+  const load = (dtype) =>
+    AutoModelForVision2Seq.from_pretrained(VISION_MODEL, { dtype, device: "webgpu", progress_callback: progress("vision") });
   vision ??= Promise.all([
     AutoProcessor.from_pretrained(VISION_MODEL, { progress_callback: progress("vision") }),
-    AutoModelForVision2Seq.from_pretrained(VISION_MODEL, {
-      dtype: "fp32",
-      device: "webgpu",
-      progress_callback: progress("vision"),
-    }),
-  ]);
+    // 4-bit is about a quarter of the size; fall back to full precision if it isn't available.
+    load({ embed_tokens: "fp16", vision_encoder: "q4", decoder_model_merged: "q4" }).catch(() => load("fp32")),
+  ]).catch((error) => {
+    vision = null;
+    throw error;
+  });
   return vision;
 }
 
@@ -114,11 +115,8 @@ self.addEventListener("message", async ({ data }) => {
       const adapter = await navigator.gpu?.requestAdapter();
       result = Boolean(adapter);
     } else if (type === "load") {
-      // Text first so Jarvis can answer sooner; the vision model follows.
       await loadText();
       postMessage({ type: "ready", which: "text" });
-      await loadVision();
-      postMessage({ type: "ready", which: "vision" });
     } else if (type === "text") {
       result = await askText(data);
     } else if (type === "vision") {

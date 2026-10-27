@@ -12,9 +12,14 @@ If installing the app isn't possible, the `web/` folder is a version of Jarvis t
 It's published free at **https://novacaine-studios.github.io/jarvis/**. Open it on your iPhone, tap
 **Wake Jarvis** once, allow the microphone and camera, and talk.
 
-- The AI runs inside Safari on the iPhone's GPU, using free open models: Qwen3 0.6B for questions and
-  SmolVLM 256M for the camera. They download once (about 1.5 GB, use Wi-Fi) and are cached after that.
-- Safari needs **Siri & Dictation** turned on for listening (Settings › Apple Intelligence & Siri).
+- The AI runs inside Safari on the iPhone's GPU, using free open models: Qwen3 0.6B for questions,
+  Moonshine + Silero VAD for hearing, and SmolVLM 256M for the camera. The brain and ears download
+  once (about 1 GB, use Wi-Fi, keep the page open until it says "Say Jarvis"); the eyes download the
+  first time you ask about the camera. Everything is cached after that.
+- Jarvis keeps the microphone open and does its own speech recognition, so "Jarvis" works every time,
+  including whispered or from across the room, and sound-alikes ("Javis", "Jervis") count too.
+- To stop Safari asking for the mic each time: tap **aA** in the address bar › Website Settings ›
+  Microphone and Camera › Allow.
 - It only listens while the page is open on screen; the screen stays awake while Jarvis is on.
   There's no locked-screen listening and no "Hey Siri" shortcut.
 - Reminders are spoken while the page is open, and an **Add to Calendar** button puts them in your

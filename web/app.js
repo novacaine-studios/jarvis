@@ -13,38 +13,63 @@ const ui = {
   video: $("camera"),
 };
 
+// ---------- Download progress ----------
+
+// Each model reports how much of it has downloaded; the status line shows the total.
+const models = {
+  ears: { loaded: 0, total: 0, ready: false },
+  text: { loaded: 0, total: 0, ready: false },
+  vision: { loaded: 0, total: 0, ready: false },
+};
+
+function onProgress(which, data) {
+  if (data.type === "progress") Object.assign(models[which], { loaded: data.loaded, total: data.total });
+  if (data.type === "ready") models[which].ready = true;
+  if (which === "ears" && data.type === "ready" && state === "waiting") setStatus("Say “Jarvis”");
+  showDownloadProgress();
+}
+
+function showDownloadProgress() {
+  const { ears, text, vision } = models;
+  if (!ears.ready || !text.ready) {
+    const loaded = ears.loaded + text.loaded;
+    const total = ears.total + text.total;
+    const pct = total ? Math.floor((loaded / total) * 100) : 0;
+    ui.brain.textContent = `Downloading Jarvis's ears and brain (one time only, keep this page open on Wi-Fi)… ${pct}%`;
+  } else if (vision.total && !vision.ready) {
+    ui.brain.textContent = `Downloading Jarvis's eyes (one time only)… ${Math.floor((vision.loaded / vision.total) * 100)}%`;
+  } else {
+    ui.brain.textContent = "";
+  }
+}
+
 // ---------- Brain (runs in a worker so the page stays responsive) ----------
 
-const worker = new Worker("./worker.js", { type: "module" });
+let worker = null;
 const pending = new Map();
 let nextId = 1;
-const ready = { text: false, vision: false };
-const downloads = { text: new Map(), vision: new Map() };
 
-worker.addEventListener("message", ({ data }) => {
-  if (data.type === "progress") {
-    downloads[data.which].set(data.file, data);
-    showDownloadProgress();
-    return;
-  }
-  if (data.type === "ready") {
-    ready[data.which] = true;
-    showDownloadProgress();
-    return;
-  }
-  const request = pending.get(data.id);
-  if (!request) return;
-  pending.delete(data.id);
-  data.ok ? request.resolve(data.result) : request.reject(new Error(data.error));
-});
-
-// If the AI engine can't load (e.g. no internet on first use), say so instead of hanging.
-worker.addEventListener("error", (event) => {
-  event.preventDefault?.();
-  ui.brain.textContent = "Couldn't load Jarvis's AI engine. Check your internet connection and reload.";
-  for (const request of pending.values()) request.reject(new Error("the AI engine didn't load"));
-  pending.clear();
-});
+function startBrain() {
+  if (worker) return;
+  worker = new Worker("./worker.js", { type: "module" });
+  worker.addEventListener("message", ({ data }) => {
+    if (data.type) {
+      onProgress(data.which, data);
+      return;
+    }
+    const request = pending.get(data.id);
+    if (!request) return;
+    pending.delete(data.id);
+    data.ok ? request.resolve(data.result) : request.reject(new Error(data.error));
+  });
+  // If the AI engine can't load (e.g. no internet on first use), say so instead of hanging.
+  worker.addEventListener("error", (event) => {
+    event.preventDefault?.();
+    ui.brain.textContent = "Couldn't load Jarvis's AI engine. Check your internet connection and reload.";
+    for (const request of pending.values()) request.reject(new Error("the AI engine didn't load"));
+    pending.clear();
+  });
+}
 
 function brain(type, payload = {}, transfer = []) {
   const id = nextId++;
@@ -52,25 +77,6 @@ function brain(type, payload = {}, transfer = []) {
     pending.set(id, { resolve, reject });
     worker.postMessage({ id, type, ...payload }, transfer);
   });
-}
-
-function showDownloadProgress() {
-  if (ready.text && ready.vision) {
-    ui.brain.textContent = "";
-    return;
-  }
-  let loaded = 0;
-  let total = 0;
-  for (const files of Object.values(downloads)) {
-    for (const f of files.values()) {
-      loaded += f.loaded;
-      total += f.total;
-    }
-  }
-  const pct = total ? Math.floor((loaded / total) * 100) : 0;
-  ui.brain.textContent = ready.text
-    ? `Downloading Jarvis's eyes… ${pct}%`
-    : `Downloading Jarvis's brain (one time, use Wi-Fi)… ${pct}%`;
 }
 
 // ---------- Voice out ----------
@@ -97,52 +103,99 @@ function speak(text) {
   });
 }
 
-// ---------- Ears (speech recognition) ----------
+// ---------- Ears ----------
+// The microphone stays open the whole time Jarvis is awake, and Jarvis's own speech recognition
+// (ears-worker.js) listens continuously, so "Jarvis" works every time, not just once.
 
-const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognizer = null;
-let recognizerGeneration = 0;
-let wantEars = false;
+let ears = null;
+let audioContext = null;
+let chunker = null;
+let mic = null; // { stream, source }
+let wantMic = false;
 
-function startEars() {
-  stopEars();
-  wantEars = true;
-  const generation = ++recognizerGeneration;
-  const r = new Recognition();
-  r.lang = "en-US";
-  r.continuous = true;
-  r.interimResults = true;
-  r.onresult = (event) => {
-    if (generation !== recognizerGeneration) return;
-    let transcript = "";
-    for (const result of event.results) transcript += result[0].transcript;
-    onTranscript(transcript);
-  };
-  r.onerror = (event) => {
-    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-      wantEars = false;
-      setStatus("Microphone or speech recognition is blocked. Allow it in Settings › Apps › Safari.");
-    }
-  };
-  // Safari ends recognition every so often; quietly start a fresh one.
-  r.onend = () => {
-    if (wantEars && generation === recognizerGeneration) setTimeout(startEars, 250);
-  };
-  recognizer = r;
+function startEarsWorker() {
+  if (ears) return;
+  ears = new Worker("./ears-worker.js", { type: "module" });
+  ears.addEventListener("message", ({ data }) => {
+    if (data.type === "progress" || data.type === "ready") onProgress("ears", data);
+    else if (data.type === "error") ui.brain.textContent = `Couldn't load Jarvis's ears: ${data.error}. Reload on Wi-Fi.`;
+    else if (data.type === "speech_start") onSpeechStart();
+    else if (data.type === "utterance") onUtterance(data.text);
+  });
+  ears.addEventListener("error", (event) => {
+    event.preventDefault?.();
+    ui.brain.textContent = "Couldn't load Jarvis's ears. Check your internet connection and reload.";
+  });
+}
+
+/** Must run inside the tap, because iOS only starts audio after a tap. */
+function createAudio() {
+  if (audioContext) return;
+  audioContext = new AudioContext();
+  // iOS interrupts audio for calls, Siri and other apps; pick back up when it lets us.
+  audioContext.addEventListener("statechange", () => {
+    if (audioContext.state !== "running" && state !== "off") audioContext.resume().catch(() => {});
+  });
+}
+
+async function startMic() {
+  wantMic = true;
+  if (mic) return true;
+  if (!chunker) {
+    await audioContext.audioWorklet.addModule("./vad-processor.js");
+    chunker = new AudioWorkletNode(audioContext, "chunk-processor");
+    chunker.port.onmessage = ({ data }) => {
+      if (models.ears.ready && (state === "waiting" || state === "listening")) {
+        ears.postMessage({ type: "audio", chunk: data }, [data.buffer]);
+      }
+    };
+    // Some browsers only run audio nodes that lead to the speakers; this path is silent (gain 0).
+    const silent = audioContext.createGain();
+    silent.gain.value = 0;
+    chunker.connect(silent).connect(audioContext.destination);
+  }
   try {
-    r.start();
-  } catch {
-    // Already starting; onend will retry.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        // Boosts quiet and distant voices. Noise suppression is off because it also removes whispers.
+        autoGainControl: true,
+        noiseSuppression: false,
+      },
+    });
+    if (!wantMic) {
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(chunker);
+    mic = { stream, source };
+    // iOS can cut the mic (e.g. a phone call); reopen it when Jarvis should be listening.
+    stream.getAudioTracks()[0]?.addEventListener("ended", () => {
+      if (mic?.stream === stream) {
+        mic = null;
+        if (wantMic) setTimeout(() => startMic().catch(() => {}), 500);
+      }
+    });
+    await audioContext.resume().catch(() => {});
+    return true;
+  } catch (error) {
+    if (error?.name === "NotAllowedError") {
+      setStatus("Jarvis can't hear you. Allow the microphone: tap aA in the address bar › Website Settings › Microphone › Allow.");
+      showWakeButton("Tap to let Jarvis listen");
+    }
+    return false;
   }
 }
 
-function stopEars() {
-  wantEars = false;
-  recognizerGeneration++;
-  try {
-    recognizer?.abort();
-  } catch {}
-  recognizer = null;
+/** iPhones send speech to the quiet earpiece while the mic is open, so Jarvis closes it while talking. */
+function stopMic() {
+  wantMic = false;
+  if (!mic) return;
+  mic.source.disconnect();
+  mic.stream.getTracks().forEach((t) => t.stop());
+  mic = null;
 }
 
 // ---------- Eyes (camera) ----------
@@ -150,6 +203,7 @@ function stopEars() {
 let cameraOn = false;
 
 async function startCamera() {
+  if (cameraOn) return;
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: "environment", width: { ideal: 1280 } },
@@ -175,15 +229,63 @@ function grabFrame(maxSide = 512) {
   return { pixels: data.buffer, width, height };
 }
 
+// ---------- Hearing the wake word ----------
+
+// Things speech recognition tends to write when someone says "Jarvis" quietly, quickly or from afar.
+const WAKE_SOUNDALIKES = new Set([
+  "jarvis", "jarvas", "jarves", "jarviss", "jarvus", "jarvi", "javis", "jervis", "jarbis", "jarvys",
+  "garvis", "charvis", "darvis", "travis", "jarvie", "jarvey", "jervais", "jarviz", "jarbus", "jaavis",
+]);
+
+function editDistance(a, b) {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diagonal = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const above = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diagonal = above;
+    }
+  }
+  return row[b.length];
+}
+
+function soundsLikeJarvis(word) {
+  if (WAKE_SOUNDALIKES.has(word)) return true;
+  if (word.length < 4 || word.length > 8) return false;
+  const d = editDistance(word, "jarvis");
+  return d <= 1 || (d <= 2 && "jgcdz".includes(word[0]) && /v|b|f/.test(word));
+}
+
+/**
+ * Finds "Jarvis" (or something that sounds like it) anywhere in what was heard.
+ * Returns the words after it ("" for a bare "Jarvis"), or null if it wasn't said.
+ */
+function textAfterWakeWord(transcript) {
+  const words = transcript.split(/\s+/).filter(Boolean);
+  const plain = words.map((w) => w.toLowerCase().replace(/[^a-z]/g, ""));
+  for (let i = 0; i < words.length; i++) {
+    // "jar vis" heard as two words counts too.
+    const joined = plain[i] + (plain[i + 1] ?? "");
+    let next = -1;
+    if (soundsLikeJarvis(plain[i])) next = i + 1;
+    else if (plain[i + 1] && soundsLikeJarvis(joined)) next = i + 2;
+    if (next >= 0) return words.slice(next).join(" ").replace(/^[\s,.!?]+|[\s,.!?]+$/g, "");
+  }
+  return null;
+}
+
 // ---------- The loop ----------
 
-const END_OF_QUESTION_SILENCE = 1500; // ms after the last word
-const YES_SIR_DELAY = 1500; // ms after a bare "Jarvis"
+const END_OF_QUESTION_SILENCE = 1000; // ms to wait for more after the question was heard
+const STILL_SPEAKING_TIMEOUT = 8000; // ms to wait for words being spoken to be written down
+const YES_SIR_DELAY = 1200; // ms after a bare "Jarvis"
 const NO_QUESTION_TIMEOUT = 8000; // ms to wait after "Yes, sir?"
 
 let state = "off"; // off | waiting | listening | thinking | speaking
 let heard = "";
-let questionFollowsWakeWord = true;
+let saidYesSir = false;
 let silenceTimer = null;
 let history = [];
 let lastAskedAt = 0;
@@ -192,65 +294,74 @@ function setStatus(text) {
   ui.status.textContent = text;
 }
 
+function showWakeButton(label) {
+  ui.wake.textContent = label;
+  ui.wake.hidden = false;
+}
+
 function setState(next) {
   state = next;
   const labels = {
     off: "Asleep. Tap to wake Jarvis.",
-    waiting: "Say “Jarvis”",
+    waiting: models.ears.ready ? "Say “Jarvis”" : "Getting my ears ready…",
     listening: "Listening…",
     thinking: "Thinking…",
     speaking: "Speaking",
   };
   setStatus(labels[next]);
   ui.wake.hidden = next !== "off";
+  if (next === "off") ui.wake.textContent = "Wake Jarvis";
   document.body.dataset.state = next;
+  ears?.postMessage({ type: next === "waiting" || next === "listening" ? "resume" : "pause" });
 }
 
-function textAfterWakeWord(transcript) {
-  const i = transcript.toLowerCase().lastIndexOf("jarvis");
-  if (i < 0) return null;
-  return transcript.slice(i + 6).replace(/^[\s,.!?]+|[\s,.!?]+$/g, "");
+function armSilenceTimer(ms) {
+  clearTimeout(silenceTimer);
+  silenceTimer = setTimeout(silenceReached, ms);
 }
 
-function onTranscript(transcript) {
+function onSpeechStart() {
+  // More words are coming: don't answer until they've been written down.
+  if (state === "listening") armSilenceTimer(STILL_SPEAKING_TIMEOUT);
+}
+
+function onUtterance(text) {
   if (state === "waiting") {
-    const q = textAfterWakeWord(transcript);
-    if (q === null) return;
-    state = "listening";
-    setStatus("Listening…");
-    heard = q;
+    if (!text) return;
+    const question = textAfterWakeWord(text);
+    ui.heard.textContent = `“${text}”`;
+    if (question === null) return;
     navigator.vibrate?.(30);
+    heard = question;
+    saidYesSir = false;
+    setState("listening");
+    armSilenceTimer(heard ? END_OF_QUESTION_SILENCE : YES_SIR_DELAY);
   } else if (state === "listening") {
-    heard = questionFollowsWakeWord
-      ? textAfterWakeWord(transcript) ?? heard
-      : textAfterWakeWord(transcript) ?? transcript.trim();
+    if (text) {
+      // Drop a repeated "Jarvis" at the start of the follow-on.
+      const rest = textAfterWakeWord(text);
+      heard = [heard, rest ?? text].filter(Boolean).join(" ");
+    }
+    armSilenceTimer(heard ? END_OF_QUESTION_SILENCE : saidYesSir ? NO_QUESTION_TIMEOUT : YES_SIR_DELAY);
   } else {
     return;
   }
   ui.heard.textContent = heard ? `“${heard}”` : "";
-  armSilenceTimer();
-}
-
-function armSilenceTimer() {
-  clearTimeout(silenceTimer);
-  const wait = heard ? END_OF_QUESTION_SILENCE : questionFollowsWakeWord ? YES_SIR_DELAY : NO_QUESTION_TIMEOUT;
-  silenceTimer = setTimeout(silenceReached, wait);
 }
 
 async function silenceReached() {
-  stopEars();
+  if (state !== "listening") return;
   if (heard) {
     await handle(heard);
-  } else if (questionFollowsWakeWord) {
+  } else if (!saidYesSir) {
     // A bare "Jarvis" and then nothing: answer like a butler, then take the question.
     await say("Yes, sir?");
     if (state === "off") return;
-    questionFollowsWakeWord = false;
+    saidYesSir = true;
     heard = "";
-    state = "listening";
-    setStatus("Listening…");
-    startEars();
-    armSilenceTimer();
+    await startMic();
+    setState("listening");
+    armSilenceTimer(NO_QUESTION_TIMEOUT);
   } else {
     resumeListening();
   }
@@ -258,16 +369,18 @@ async function silenceReached() {
 
 async function say(text) {
   setState("speaking");
+  stopMic();
   await speak(text);
 }
 
-function resumeListening() {
+async function resumeListening() {
   clearTimeout(silenceTimer);
   if (state === "off") return;
   heard = "";
-  questionFollowsWakeWord = true;
+  saidYesSir = false;
   setState("waiting");
-  startEars();
+  const listening = await startMic();
+  if (!listening && state === "waiting") showWakeButton("Tap to keep listening");
 }
 
 const SLEEP = /\b(go to sleep|stop listening|goodbye|good night|shut down)\b/;
@@ -276,6 +389,7 @@ const SEES = /\b(look|looking|see|seeing|this|that|these|those|here|camera|read|
 const MATHS = /\b(integral|integrate|derivative|differentiate|solve|equation|calculate|square root|percent|factorial|sum of|times|divided|plus|minus)\b|\d\s*[-+*/^x]\s*\d/;
 
 async function handle(question) {
+  clearTimeout(silenceTimer);
   const q = question.toLowerCase();
   ui.extra.replaceChildren();
   if (SLEEP.test(q)) {
@@ -283,7 +397,7 @@ async function handle(question) {
     goToSleep();
     return;
   }
-  if (CANCEL.test(q.trim())) {
+  if (CANCEL.test(q.trim().replace(/[.!?]+$/, ""))) {
     resumeListening();
     return;
   }
@@ -305,10 +419,22 @@ async function think(question, q) {
   if (SEES.test(q)) {
     const frame = grabFrame();
     if (!frame) return "I can't see anything, sir. Allow camera access and keep this page open.";
-    if (!ready.vision) return "My eyes are still downloading, sir. Give me a minute.";
-    return brain("vision", { question, ...frame }, [frame.pixels]);
+    if (!models.vision.ready) {
+      // The eyes download the first time they're needed, so the brain and ears load faster.
+      await say("One moment, sir. Opening my eyes for the first time.");
+      setState("thinking");
+    }
+    try {
+      const reply = await brain("vision", { question, ...frame }, [frame.pixels]);
+      onProgress("vision", { type: "ready" });
+      return reply;
+    } catch (error) {
+      if (!models.vision.ready) Object.assign(models.vision, { loaded: 0, total: 0 });
+      showDownloadProgress();
+      throw error;
+    }
   }
-  if (!ready.text) return "I'm still downloading my brain, sir. Keep this page open on Wi-Fi for a few minutes.";
+  if (!models.text.ready) return "I'm still downloading my brain, sir. Keep this page open on Wi-Fi for a few minutes.";
 
   if (Date.now() - lastAskedAt > 5 * 60 * 1000) history = [];
   lastAskedAt = Date.now();
@@ -425,41 +551,54 @@ function calendarButton(title, date) {
 let wakeLock = null;
 
 async function wake() {
-  if (!Recognition) {
-    setStatus("This browser can't listen. Open this page in Safari on your iPhone, and turn on Siri & Dictation.");
-    return;
-  }
-  // iOS only allows sound after a tap, so unlock speech now.
+  // iOS only allows sound after a tap, so unlock speech and audio now, before anything is awaited.
   speechSynthesis.speak(new SpeechSynthesisUtterance(""));
   pickVoice();
-  await startCamera();
+  createAudio();
+  audioContext.resume().catch(() => {});
+  if (state !== "off") {
+    // "Tap to keep listening": just reopen the mic.
+    resumeListening();
+    return;
+  }
+  // Ask Safari to keep the downloaded models instead of clearing them when space is low.
+  navigator.storage?.persist?.().catch(() => {});
   try {
     wakeLock = await navigator.wakeLock?.request("screen");
   } catch {}
-  setState("waiting");
-  startEars();
-  if (!ready.text) {
-    const gpu = await brain("check");
-    if (!gpu) {
-      ui.brain.textContent = "This browser has no WebGPU, so the AI can't run. Update iOS to 26 or later and use Safari.";
-      return;
-    }
+
+  if (!navigator.gpu || !(await navigator.gpu.requestAdapter().catch(() => null))) {
+    setStatus("This browser has no WebGPU, so Jarvis can't think. Update to iOS 26 or later and use Safari.");
+    return;
+  }
+  startEarsWorker();
+  startBrain();
+  if (!models.text.ready) {
     showDownloadProgress();
     brain("load").catch((e) => (ui.brain.textContent = `Couldn't download the brain: ${e.message}. Reload on Wi-Fi.`));
   }
+  setState("waiting");
+  await startCamera();
+  await resumeListening();
 }
 
 function goToSleep() {
   clearTimeout(silenceTimer);
-  stopEars();
+  stopMic();
   speechSynthesis.cancel();
   wakeLock?.release?.();
+  wakeLock = null;
   setState("off");
 }
 
 ui.wake.addEventListener("click", wake);
-// Safari pauses the page in the background; when it comes back, keep listening.
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && state === "waiting") startEars();
+// Safari pauses the page in the background; when it comes back, pick up listening again.
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible" || state === "off") return;
+  audioContext?.resume().catch(() => {});
+  try {
+    wakeLock = await navigator.wakeLock?.request("screen");
+  } catch {}
+  if (state === "waiting" || state === "listening") resumeListening();
 });
 setState("off");
