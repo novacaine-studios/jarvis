@@ -114,6 +114,11 @@ function startBrain() {
     }
     const request = pending.get(data.id);
     if (!request) return;
+    // Your PC sends the answer a sentence at a time, so Jarvis can start speaking straight away.
+    if (data.partial) {
+      request.onPartial?.(data.partial);
+      return;
+    }
     pending.delete(data.id);
     data.ok ? request.resolve(data.result) : request.reject(new Error(data.error));
   });
@@ -139,10 +144,10 @@ function loadBrain() {
   });
 }
 
-function brain(type, payload = {}, transfer = []) {
+function brain(type, payload = {}, transfer = [], onPartial = null) {
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    pending.set(id, { resolve, reject, onPartial });
     worker.postMessage({ id, type, ...payload }, transfer);
   });
 }
@@ -374,7 +379,7 @@ function textAfterWakeWord(transcript) {
 
 // ---------- The loop ----------
 
-const END_OF_QUESTION_SILENCE = 1000; // ms to wait for more after the question was heard
+const END_OF_QUESTION_SILENCE = 700; // ms to wait for more after the question was heard
 const STILL_SPEAKING_TIMEOUT = 8000; // ms to wait for words being spoken to be written down
 const YES_SIR_DELAY = 1200; // ms after a bare "Jarvis"
 const NO_QUESTION_TIMEOUT = 8000; // ms to wait after "Yes, sir?"
@@ -619,18 +624,37 @@ async function handle(question) {
 
   setState("thinking");
   ui.reply.textContent = "";
+  // Speak each sentence as soon as it arrives, while the rest is still being worked out.
+  let streamed = false;
+  let speaking = Promise.resolve();
+  const speakSentence = (sentence) => {
+    if (state === "off") return;
+    if (!streamed) {
+      streamed = true;
+      setState("speaking");
+      stopMic();
+    }
+    ui.reply.textContent = [ui.reply.textContent, sentence].filter(Boolean).join(" ");
+    speaking = speaking.then(() => speak(sentence));
+  };
   let reply;
   try {
-    reply = localSkill(question) ?? (await think(question, q));
+    reply = localSkill(question) ?? (await think(question, q, speakSentence));
   } catch (error) {
     reply = `Sorry, sir, something went wrong. ${error.message}`;
+    streamed = false;
   }
-  ui.reply.textContent = reply;
-  if (state !== "off") await say(reply);
+  if (streamed) {
+    await speaking;
+  } else {
+    await speaking;
+    ui.reply.textContent = reply;
+    if (state !== "off") await say(reply);
+  }
   resumeListening();
 }
 
-async function think(question, q) {
+async function think(question, q, onSentence) {
   if (SEES.test(q)) {
     const frame = grabFrame(pc ? 768 : 512);
     if (!frame) return "I can't see anything, sir. Allow camera access and keep this page open.";
@@ -644,7 +668,7 @@ async function think(question, q) {
       startedLoading("vision");
     }
     try {
-      const reply = await brain("vision", { question, ...frame }, [frame.pixels]);
+      const reply = await brain("vision", { question, ...frame }, [frame.pixels], onSentence);
       onProgress("vision", { type: "ready" });
       return reply;
     } catch (error) {
@@ -663,7 +687,7 @@ async function think(question, q) {
     question: `[Local time: ${now}]\n${question}`,
     history,
     think: MATHS.test(q),
-  });
+  }, [], onSentence);
   history.push({ role: "user", content: question }, { role: "assistant", content: reply });
   history = history.slice(-8);
   return reply;

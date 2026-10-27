@@ -50,7 +50,7 @@ CONTEXT = 64
 # Lower than usual so quiet or far-away speech still counts as speech.
 SPEECH_THRESHOLD = 0.15
 EXIT_THRESHOLD = 0.05
-MIN_SILENCE_SAMPLES = int(0.5 * SAMPLE_RATE)  # a pause this long ends an utterance
+MIN_SILENCE_SAMPLES = int(0.4 * SAMPLE_RATE)  # a pause this long ends an utterance
 SPEECH_PAD_SAMPLES = int(0.25 * SAMPLE_RATE)
 MIN_SPEECH_SAMPLES = int(0.2 * SAMPLE_RATE)
 MAX_SPEECH_SAMPLES = 20 * SAMPLE_RATE
@@ -198,10 +198,12 @@ class Ears:
         peak = float(np.abs(audio).max()) if len(audio) else 0
         if peak > 1e-4:
             audio = audio * min(0.9 / peak, 30)
-        text, heard = "", {"match": None, "wake": None}
+        text, heard, took = "", {"match": None, "wake": None}, 0.0
         try:
+            started = time.monotonic()
             async with WHISPER_LOCK:
                 text = await asyncio.to_thread(self.whisper, audio)
+            took = time.monotonic() - started
             feats = await asyncio.to_thread(voice_match.features, audio)
             self.recent[utterance_id] = feats
             while len(self.recent) > 8:
@@ -211,7 +213,7 @@ class Ears:
         except Exception as error:
             log("Couldn't transcribe:", error)
         if text or heard["match"] or heard["wake"] is not None:
-            log("Heard:", heard["match"] or text)
+            log(f"Heard ({took:.1f}s to write down):", heard["match"] or text)
         if not self.paused:
             await self.send({"type": "utterance", "id": utterance_id, "text": text, **heard})
 
@@ -221,7 +223,8 @@ class Ears:
         segments, _ = WHISPER.transcribe(
             audio,
             language="en" if CONFIG["whisper_model"].endswith(".en") else None,
-            beam_size=3,
+            beam_size=1,  # fastest; Whisper is accurate enough without searching alternatives
+            without_timestamps=True,
             vad_filter=False,
             condition_on_previous_text=False,
             initial_prompt="Hey Jarvis.",
@@ -294,41 +297,85 @@ def for_speech(reply):
     return re.sub(r"[*#`$_]|\\[()[\]]", "", reply).strip()
 
 
-async def ollama_chat(body):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{CONFIG['ollama_url']}/api/chat", json={**body, "stream": False}) as response:
-            data = await response.json()
+# Keep the models loaded between questions, so they don't have to warm up every time.
+KEEP_ALIVE = "2h"
+LIGHT_TEXT_MODEL = "qwen3:1.7b"
+# Long answers (especially maths "thinking") can take a while; never give up on one too early.
+OLLAMA_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=300)
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+
+async def ollama_chat(body, on_sentence=None):
+    """Asks Ollama, streaming the answer so each finished sentence can be spoken straight away."""
+    answer = ""
+    spoken = 0  # how much of the answer has been passed to on_sentence
+    async with aiohttp.ClientSession(timeout=OLLAMA_TIMEOUT) as session:
+        async with session.post(
+            f"{CONFIG['ollama_url']}/api/chat", json={**body, "stream": True, "keep_alive": KEEP_ALIVE}
+        ) as response:
             if response.status != 200:
+                data = await response.json(content_type=None)
                 raise RuntimeError(data.get("error", f"Ollama answered {response.status}"))
-            return data["message"]["content"]
+            async for line in response.content:
+                if not line.strip():
+                    continue
+                data = json.loads(line)
+                if data.get("error"):
+                    raise RuntimeError(data["error"])
+                answer += data.get("message", {}).get("content", "")
+                if not on_sentence or ("<think>" in answer and "</think>" not in answer):
+                    continue
+                if "</think>" in answer:
+                    spoken = max(spoken, answer.index("</think>") + len("</think>"))
+                # Pass on every complete sentence (one followed by more text).
+                for part in SENTENCE_END.split(answer[spoken:])[:-1]:
+                    spoken += len(part)
+                    while spoken < len(answer) and answer[spoken].isspace():
+                        spoken += 1
+                    sentence = for_speech(part)
+                    if sentence:
+                        await on_sentence(sentence)
+    if on_sentence:
+        rest = for_speech(answer[spoken:])
+        if rest:
+            await on_sentence(rest)
+    return for_speech(answer)
 
 
-async def ask_text(question, history, think):
+async def ask_text(question, history, think, on_sentence):
     messages = [{"role": "system", "content": SYSTEM}, *history, {"role": "user", "content": question}]
     body = {
         "model": CONFIG["text_model"],
         "messages": messages,
-        "options": {"temperature": 0.6 if think else 0.7, "num_predict": 6000 if think else 500},
+        "options": {"temperature": 0.6 if think else 0.7, "num_predict": 4000 if think else 400},
     }
     try:
-        return for_speech(await ollama_chat({**body, "think": bool(think)}))
+        return await ollama_chat({**body, "think": bool(think)}, on_sentence)
     except RuntimeError as error:
         if "think" not in str(error):
             raise
-        return for_speech(await ollama_chat(body))  # a model that can't "think" step by step
+        return await ollama_chat(body, on_sentence)  # a model that can't "think" step by step
 
 
-async def ask_vision(question, image):
+async def ask_vision(question, image, on_sentence):
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": f"{question}\nAnswer in one or two short spoken sentences.", "images": [image]},
     ]
-    return for_speech(await ollama_chat({"model": CONFIG["vision_model"], "messages": messages, "options": {"num_predict": 300}}))
+    body = {"model": CONFIG["vision_model"], "messages": messages, "options": {"num_predict": 200}}
+    return await ollama_chat(body, on_sentence)
 
 
 async def brain(data, send):
     kind = data.get("type")
     request_id = data.get("id")
+    started = time.monotonic()
+
+    async def on_sentence(sentence):
+        if not hasattr(on_sentence, "first"):
+            on_sentence.first = time.monotonic() - started
+        await send({"id": request_id, "partial": sentence})
+
     try:
         result = None
         if kind == "check":
@@ -336,13 +383,47 @@ async def brain(data, send):
         elif kind == "load":
             await send({"type": "ready", "which": "text"})
         elif kind == "text":
-            result = await ask_text(data["question"], data.get("history", []), data.get("think", False))
+            log("Thinking about:", data["question"].splitlines()[-1])
+            result = await ask_text(data["question"], data.get("history", []), data.get("think", False), on_sentence)
         elif kind == "vision":
-            result = await ask_vision(data["question"], data["image"])
+            log("Looking:", data["question"])
+            result = await ask_vision(data["question"], data["image"], on_sentence)
+        if kind in ("text", "vision"):
+            first = getattr(on_sentence, "first", time.monotonic() - started)
+            log(f"Answered: started speaking after {first:.1f}s, finished after {time.monotonic() - started:.1f}s")
         await send({"id": request_id, "ok": True, "result": result})
     except Exception as error:
-        log("Brain error:", error)
-        await send({"id": request_id, "ok": False, "error": str(error)})
+        message = str(error) or type(error).__name__
+        log("Brain error:", message)
+        await send({"id": request_id, "ok": False, "error": message})
+
+
+async def warm_up():
+    """Loads the brain into memory now, and says whether it's on the graphics card (fast) or not."""
+    model = CONFIG["text_model"]
+    try:
+        async with aiohttp.ClientSession(timeout=OLLAMA_TIMEOUT) as session:
+            await session.post(f"{CONFIG['ollama_url']}/api/generate", json={"model": model, "keep_alive": KEEP_ALIVE})
+            async with session.get(f"{CONFIG['ollama_url']}/api/ps") as response:
+                running = (await response.json()).get("models", [])
+        info = next((m for m in running if m.get("name", "").startswith(model)), None)
+        if info is None:
+            return
+        on_gpu = info.get("size_vram", 0) / max(1, info.get("size", 1))
+        if on_gpu > 0.9:
+            log(f"Brain: {model} on the graphics card")
+        elif model == DEFAULTS["text_model"]:
+            # Without a big enough graphics card, a smaller brain answers several times faster.
+            log(f"{model} doesn't fit on this PC's graphics card, so switching to the faster {LIGHT_TEXT_MODEL}…")
+            exe = shutil.which("ollama") or "ollama"
+            await asyncio.to_thread(subprocess.run, [exe, "pull", LIGHT_TEXT_MODEL])
+            CONFIG["text_model"] = LIGHT_TEXT_MODEL
+            CONFIG_FILE.write_text(json.dumps(CONFIG, indent=2))
+            await warm_up()
+        else:
+            log(f"Brain: {model} is running {'partly ' if on_gpu else ''}on the processor, so answers will be slow.")
+    except Exception as error:
+        log("Couldn't warm up the brain:", error)
 
 
 # ---------- Web server ----------
@@ -506,6 +587,7 @@ async def main():
     log("Loading hearing models…")
     VAD = load_vad()
     WHISPER = await asyncio.to_thread(load_whisper)
+    await warm_up()
     runner = web.AppRunner(make_app())
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", port).start()
