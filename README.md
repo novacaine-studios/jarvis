@@ -6,6 +6,21 @@ Everything works by voice, including with the screen locked and the phone in you
 **Completely free.** All the AI runs on the iPhone itself. There's no account, no API key, no
 Anthropic or OpenAI service, and no cost per question. After the first download it works offline.
 
+## Jarvis in Safari (no install, no Apple ID)
+
+If installing the app isn't possible, the `web/` folder is a version of Jarvis that runs in Safari.
+It's published free at **https://novacaine-studios.github.io/jarvis/**. Open it on your iPhone, tap
+**Wake Jarvis** once, allow the microphone and camera, and talk.
+
+- The AI runs inside Safari on the iPhone's GPU, using free open models: Qwen3 0.6B for questions and
+  SmolVLM 256M for the camera. They download once (about 1.5 GB, use Wi-Fi) and are cached after that.
+- Safari needs **Siri & Dictation** turned on for listening (Settings › Apple Intelligence & Siri).
+- It only listens while the page is open on screen; the screen stays awake while Jarvis is on.
+  There's no locked-screen listening and no "Hey Siri" shortcut.
+- Reminders are spoken while the page is open, and an **Add to Calendar** button puts them in your
+  Calendar with an alert so you get them when it's closed.
+- The models are smaller than the app's, so answers are simpler.
+
 ## Talking to Jarvis
 
 | You say | Jarvis |

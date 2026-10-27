@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Jarvis</title>
+  <meta name="description" content="A free voice and vision assistant that runs on your iPhone.">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: rgba(18, 24, 32, 0.78);
+      --text: #e8eef5;
+      --muted: #9fb0c2;
+      --accent: #4cc3ff;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font: 17px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+    #camera { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.55; }
+    main { position: relative; min-height: 100%; display: flex; flex-direction: column; gap: 12px;
+      padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px); }
+    .pill { align-self: flex-start; background: var(--panel); backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px); padding: 8px 14px; border-radius: 999px; }
+    #status::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+      margin-right: 8px; background: var(--muted); vertical-align: middle; }
+    body[data-state="waiting"] #status::before { background: #3ddc84; }
+    body[data-state="listening"] #status::before { background: var(--accent); animation: pulse 1s infinite; }
+    body[data-state="thinking"] #status::before { background: #ffcc4d; animation: pulse 0.6s infinite; }
+    body[data-state="speaking"] #status::before { background: var(--accent); }
+    @keyframes pulse { 50% { opacity: 0.3; } }
+    #brain { font-size: 14px; color: var(--muted); }
+    #brain:empty, #heard:empty, #reply:empty, #extra:empty { display: none; }
+    .spacer { flex: 1; }
+    .card { background: var(--panel); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border-radius: 14px; padding: 14px 16px; }
+    #heard { color: var(--muted); font-style: italic; }
+    .button, #wake { display: inline-block; border: 0; border-radius: 14px; padding: 16px 20px;
+      font: 600 18px/1 inherit; background: var(--accent); color: #00131f; text-decoration: none;
+      text-align: center; }
+    #wake { width: 100%; }
+  </style>
+</head>
+<body data-state="off">
+  <video id="camera" playsinline muted></video>
+  <main>
+    <div id="status" class="pill" role="status" aria-live="polite"></div>
+    <div id="brain" class="pill"></div>
+    <div class="spacer"></div>
+    <div id="heard" class="card"></div>
+    <div id="reply" class="card" aria-live="polite"></div>
+    <div id="extra"></div>
+    <button id="wake" type="button">Wake Jarvis</button>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
