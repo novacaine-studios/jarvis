@@ -18,6 +18,12 @@ It's published free at **https://novacaine-studios.github.io/jarvis/**. Open it 
   first time you ask about the camera. Everything is cached after that.
 - Jarvis keeps the microphone open and does its own speech recognition, so "Jarvis" works every time,
   including whispered or from across the room, and sound-alikes ("Javis", "Jervis") count too.
+- **Fix** next to what Jarvis heard lets you type what you actually said. Jarvis remembers the right
+  words and how that recording sounded, so the next time you say it the same way it hears it right.
+  **Teach Jarvis my voice** records you saying "Jarvis" normally, quietly, whispered and from further
+  away, so it wakes to your voice even when the words come out wrong. All of this stays on the phone.
+- If Safari runs out of memory and reloads the page, Jarvis notices and switches to a lighter brain
+  (SmolLM2 360M) so it doesn't crash again.
 - To stop Safari asking for the mic each time: tap **aA** in the address bar › Website Settings ›
   Microphone and Camera › Allow.
 - It only listens while the page is open on screen; the screen stays awake while Jarvis is on.

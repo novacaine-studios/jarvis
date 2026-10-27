@@ -9,8 +9,12 @@ import {
 } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
 
 // Free open-weight models. The text model answers general questions and maths;
-// the vision model describes what the camera sees.
-const TEXT_MODEL = "onnx-community/Qwen3-0.6B-ONNX";
+// the vision model describes what the camera sees. "light" is used instead of Qwen3 if Safari
+// ran out of memory loading it before.
+const TEXT_MODELS = {
+  full: { id: "onnx-community/Qwen3-0.6B-ONNX", dtype: "q4f16", thinks: true },
+  light: { id: "HuggingFaceTB/SmolLM2-360M-Instruct", dtype: "q4f16", thinks: false },
+};
 const VISION_MODEL = "HuggingFaceTB/SmolVLM-256M-Instruct";
 
 const SYSTEM = `You are Jarvis, a helpful voice assistant on the user's iPhone. Address the user as "sir".
@@ -18,6 +22,9 @@ Everything you write is read aloud, so answer in plain spoken sentences: no mark
 Keep answers to one to three sentences unless asked for detail.
 Say maths the way a person would, for example "the integral of x from one to two is three halves".`;
 
+// Only one model is kept in memory at a time; Safari closes pages that use too much.
+// Switching reloads the other from Safari's cache, which takes seconds, not a download.
+let textChoice = "full";
 let text = null;
 let vision = null;
 
@@ -27,30 +34,54 @@ function progress(which) {
   };
 }
 
+async function unload(loaded) {
+  if (!loaded) return;
+  try {
+    const [, model] = await loaded;
+    await model.dispose();
+  } catch {}
+}
+
 function loadText() {
-  text ??= Promise.all([
-    AutoTokenizer.from_pretrained(TEXT_MODEL, { progress_callback: progress("text") }),
-    AutoModelForCausalLM.from_pretrained(TEXT_MODEL, {
-      dtype: "q4f16",
-      device: "webgpu",
-      progress_callback: progress("text"),
-    }),
-  ]);
+  if (!text) {
+    const { id, dtype } = TEXT_MODELS[textChoice];
+    const previous = vision;
+    vision = null;
+    text = unload(previous)
+      .then(() =>
+        Promise.all([
+          AutoTokenizer.from_pretrained(id, { progress_callback: progress("text") }),
+          AutoModelForCausalLM.from_pretrained(id, { dtype, device: "webgpu", progress_callback: progress("text") }),
+        ]),
+      )
+      .catch((error) => {
+        text = null;
+        throw error;
+      });
+  }
   return text;
 }
 
-/** Only loaded the first time you ask about the camera, to keep memory low (Safari reloads pages that use too much). */
+/** Only loaded the first time you ask about the camera. */
 function loadVision() {
-  const load = (dtype) =>
-    AutoModelForVision2Seq.from_pretrained(VISION_MODEL, { dtype, device: "webgpu", progress_callback: progress("vision") });
-  vision ??= Promise.all([
-    AutoProcessor.from_pretrained(VISION_MODEL, { progress_callback: progress("vision") }),
-    // 4-bit is about a quarter of the size; fall back to full precision if it isn't available.
-    load({ embed_tokens: "fp16", vision_encoder: "q4", decoder_model_merged: "q4" }).catch(() => load("fp32")),
-  ]).catch((error) => {
-    vision = null;
-    throw error;
-  });
+  if (!vision) {
+    const load = (dtype) =>
+      AutoModelForVision2Seq.from_pretrained(VISION_MODEL, { dtype, device: "webgpu", progress_callback: progress("vision") });
+    const previous = text;
+    text = null;
+    vision = unload(previous)
+      .then(() =>
+        Promise.all([
+          AutoProcessor.from_pretrained(VISION_MODEL, { progress_callback: progress("vision") }),
+          // 4-bit is about a quarter of the size; fall back to full precision if it isn't available.
+          load({ embed_tokens: "fp16", vision_encoder: "q4", decoder_model_merged: "q4" }).catch(() => load("fp32")),
+        ]),
+      )
+      .catch((error) => {
+        vision = null;
+        throw error;
+      });
+  }
   return vision;
 }
 
@@ -68,6 +99,7 @@ function forSpeech(reply) {
 
 async function askText({ question, history, think }) {
   const [tokenizer, model] = await loadText();
+  think &&= TEXT_MODELS[textChoice].thinks;
   const messages = [{ role: "system", content: SYSTEM }, ...history, { role: "user", content: question }];
   const inputs = tokenizer.apply_chat_template(messages, {
     add_generation_prompt: true,
@@ -115,6 +147,7 @@ self.addEventListener("message", async ({ data }) => {
       const adapter = await navigator.gpu?.requestAdapter();
       result = Boolean(adapter);
     } else if (type === "load") {
+      textChoice = data.choice ?? textChoice;
       await loadText();
       postMessage({ type: "ready", which: "text" });
     } else if (type === "text") {

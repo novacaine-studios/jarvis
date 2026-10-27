@@ -1,6 +1,7 @@
 // Jarvis for Safari: wake word -> question -> (camera) -> on-device AI -> spoken reply.
 // Jarvis never touches the volume: speech plays at whatever level the phone is set to,
 // through AirPods when they're connected.
+import { addTemplate, correct, forgetVoice, knowsMyVoice, learnCorrection, memory } from "./voice-memory.js";
 
 const $ = (id) => document.getElementById(id);
 const ui = {
@@ -8,6 +9,13 @@ const ui = {
   status: $("status"),
   brain: $("brain"),
   heard: $("heard"),
+  heardText: $("heard-text"),
+  fix: $("fix"),
+  fixForm: $("fix-form"),
+  fixInput: $("fix-input"),
+  fixCancel: $("fix-cancel"),
+  teach: $("teach"),
+  forget: $("forget"),
   reply: $("reply"),
   extra: $("extra"),
   video: $("camera"),
@@ -24,24 +32,68 @@ const models = {
 
 function onProgress(which, data) {
   if (data.type === "progress") Object.assign(models[which], { loaded: data.loaded, total: data.total });
-  if (data.type === "ready") models[which].ready = true;
-  if (which === "ears" && data.type === "ready" && state === "waiting") setStatus("Say “Jarvis”");
+  if (data.type === "ready") {
+    models[which].ready = true;
+    finishedLoading();
+    // One download at a time keeps memory low: the brain starts once the ears are done.
+    if (which === "ears") loadBrain();
+  }
+  if (which === "ears" && data.type === "ready" && state === "waiting") setState("waiting");
   showDownloadProgress();
 }
 
+const percent = ({ loaded, total }) => (total ? Math.floor((loaded / total) * 100) : 0);
+
 function showDownloadProgress() {
   const { ears, text, vision } = models;
-  if (!ears.ready || !text.ready) {
-    const loaded = ears.loaded + text.loaded;
-    const total = ears.total + text.total;
-    const pct = total ? Math.floor((loaded / total) * 100) : 0;
-    ui.brain.textContent = `Downloading Jarvis's ears and brain (one time only, keep this page open on Wi-Fi)… ${pct}%`;
+  const lighter = textChoice === "light" ? " (a lighter one, after Safari ran short of memory)" : "";
+  if (!ears.ready) {
+    ui.brain.textContent = `Step 1 of 2: downloading Jarvis's ears… ${percent(ears)}%. One time only; keep this page open on Wi-Fi.`;
+  } else if (!text.ready) {
+    ui.brain.textContent = `Step 2 of 2: downloading Jarvis's brain${lighter}… ${percent(text)}%. Finished parts are kept if the page reloads.`;
   } else if (vision.total && !vision.ready) {
-    ui.brain.textContent = `Downloading Jarvis's eyes (one time only)… ${Math.floor((vision.loaded / vision.total) * 100)}%`;
+    ui.brain.textContent = `Downloading Jarvis's eyes (one time only)… ${percent(vision)}%`;
   } else {
     ui.brain.textContent = "";
   }
 }
+
+// ---------- Surviving Safari's memory limit ----------
+// Safari closes a page that uses too much memory and reloads it. Jarvis notes what it was loading,
+// so after such a reload it knows what crashed and loads something lighter instead of crashing again.
+
+const LOADING_KEY = "jarvis-loading";
+const CRASHES_KEY = "jarvis-crashes";
+const crashes = (() => {
+  try {
+    const counts = JSON.parse(localStorage.getItem(CRASHES_KEY)) ?? {};
+    const crashedWhile = localStorage.getItem(LOADING_KEY);
+    if (crashedWhile) {
+      counts[crashedWhile] = (counts[crashedWhile] ?? 0) + 1;
+      localStorage.setItem(CRASHES_KEY, JSON.stringify(counts));
+      localStorage.removeItem(LOADING_KEY);
+    }
+    return counts;
+  } catch {
+    return {};
+  }
+})();
+const textChoice = crashes["text-full"] ? "light" : "full";
+
+function startedLoading(stage) {
+  try {
+    localStorage.setItem(LOADING_KEY, stage);
+  } catch {}
+}
+
+function finishedLoading() {
+  try {
+    localStorage.removeItem(LOADING_KEY);
+  } catch {}
+}
+
+// Leaving the page normally isn't a crash.
+addEventListener("pagehide", finishedLoading);
 
 // ---------- Brain (runs in a worker so the page stays responsive) ----------
 
@@ -68,6 +120,19 @@ function startBrain() {
     ui.brain.textContent = "Couldn't load Jarvis's AI engine. Check your internet connection and reload.";
     for (const request of pending.values()) request.reject(new Error("the AI engine didn't load"));
     pending.clear();
+  });
+}
+
+let brainLoading = false;
+function loadBrain() {
+  if (brainLoading || models.text.ready) return;
+  brainLoading = true;
+  startBrain();
+  startedLoading(`text-${textChoice}`);
+  brain("load", { choice: textChoice }).catch((e) => {
+    finishedLoading();
+    brainLoading = false;
+    ui.brain.textContent = `Couldn't download the brain: ${e.message}. Reload on Wi-Fi.`;
   });
 }
 
@@ -115,13 +180,19 @@ let wantMic = false;
 
 function startEarsWorker() {
   if (ears) return;
+  startedLoading("ears");
   ears = new Worker("./ears-worker.js", { type: "module" });
   ears.addEventListener("message", ({ data }) => {
     if (data.type === "progress" || data.type === "ready") onProgress("ears", data);
-    else if (data.type === "error") ui.brain.textContent = `Couldn't load Jarvis's ears: ${data.error}. Reload on Wi-Fi.`;
-    else if (data.type === "speech_start") onSpeechStart();
-    else if (data.type === "utterance") onUtterance(data.text);
+    else if (data.type === "error") {
+      finishedLoading();
+      ui.brain.textContent = `Couldn't load Jarvis's ears: ${data.error}. Reload on Wi-Fi.`;
+    } else if (data.type === "speech_start") onSpeechStart();
+    else if (data.type === "utterance") onUtterance(data);
+    else if (data.type === "learned") addTemplate(data.template);
   });
+  // What Jarvis has already learned about your voice.
+  ears.postMessage({ type: "templates", templates: memory.templates });
   ears.addEventListener("error", (event) => {
     event.preventDefault?.();
     ui.brain.textContent = "Couldn't load Jarvis's ears. Check your internet connection and reload.";
@@ -145,7 +216,7 @@ async function startMic() {
     await audioContext.audioWorklet.addModule("./vad-processor.js");
     chunker = new AudioWorkletNode(audioContext, "chunk-processor");
     chunker.port.onmessage = ({ data }) => {
-      if (models.ears.ready && (state === "waiting" || state === "listening")) {
+      if (models.ears.ready && (state === "waiting" || state === "listening" || state === "teaching")) {
         ears.postMessage({ type: "audio", chunk: data }, [data.buffer]);
       }
     };
@@ -252,7 +323,7 @@ function editDistance(a, b) {
 }
 
 function soundsLikeJarvis(word) {
-  if (WAKE_SOUNDALIKES.has(word)) return true;
+  if (WAKE_SOUNDALIKES.has(word) || memory.soundalikes.includes(word)) return true;
   if (word.length < 4 || word.length > 8) return false;
   const d = editDistance(word, "jarvis");
   return d <= 1 || (d <= 2 && "jgcdz".includes(word[0]) && /v|b|f/.test(word));
@@ -283,8 +354,9 @@ const STILL_SPEAKING_TIMEOUT = 8000; // ms to wait for words being spoken to be 
 const YES_SIR_DELAY = 1200; // ms after a bare "Jarvis"
 const NO_QUESTION_TIMEOUT = 8000; // ms to wait after "Yes, sir?"
 
-let state = "off"; // off | waiting | listening | thinking | speaking
+let state = "off"; // off | waiting | listening | thinking | speaking | teaching
 let heard = "";
+let shown = { text: "", ids: [] }; // what's on screen as heard, and which recordings it came from
 let saidYesSir = false;
 let silenceTimer = null;
 let history = [];
@@ -307,12 +379,16 @@ function setState(next) {
     listening: "Listening…",
     thinking: "Thinking…",
     speaking: "Speaking",
+    teaching: "Learning your voice…",
   };
   setStatus(labels[next]);
   ui.wake.hidden = next !== "off";
   if (next === "off") ui.wake.textContent = "Wake Jarvis";
   document.body.dataset.state = next;
-  ears?.postMessage({ type: next === "waiting" || next === "listening" ? "resume" : "pause" });
+  ears?.postMessage({ type: ["waiting", "listening", "teaching"].includes(next) ? "resume" : "pause" });
+  ui.teach.hidden = next !== "waiting" || !models.ears.ready;
+  ui.teach.textContent = knowsMyVoice() ? "Teach Jarvis my voice again" : "Teach Jarvis my voice";
+  ui.forget.hidden = ui.teach.hidden || (!memory.templates.length && !memory.fixes.length && !memory.soundalikes.length);
 }
 
 function armSilenceTimer(ms) {
@@ -325,28 +401,141 @@ function onSpeechStart() {
   if (state === "listening") armSilenceTimer(STILL_SPEAKING_TIMEOUT);
 }
 
-function onUtterance(text) {
+/** What was said, using everything Jarvis has learned about the user's voice. */
+function interpret({ text, match, wake }) {
+  // Sounded just like something the user corrected before: trust that over the recogniser.
+  if (match) return match;
+  let result = correct(text);
+  // Sounded like the user's own "Jarvis", even if the words came out differently.
+  if (wake != null && textAfterWakeWord(result) === null) {
+    const words = result.split(/\s+/).filter(Boolean);
+    result = ["Jarvis", ...words.slice(Math.round(words.length * wake))].join(" ");
+  }
+  return result;
+}
+
+function showHeard(text, ids) {
+  shown = { text, ids };
+  ui.heardText.textContent = text ? `“${text}”` : "";
+  ui.heard.hidden = !text;
+}
+
+function onUtterance(data) {
+  if (state === "teaching") {
+    learnWakeSample(data);
+    return;
+  }
+  const text = interpret(data);
   if (state === "waiting") {
     if (!text) return;
+    showHeard(text, [data.id]);
     const question = textAfterWakeWord(text);
-    ui.heard.textContent = `“${text}”`;
-    if (question === null) return;
-    navigator.vibrate?.(30);
-    heard = question;
-    saidYesSir = false;
-    setState("listening");
-    armSilenceTimer(heard ? END_OF_QUESTION_SILENCE : YES_SIR_DELAY);
+    if (question !== null) startQuestion(question);
   } else if (state === "listening") {
     if (text) {
+      showHeard([shown.text, text].filter(Boolean).join(" "), [...shown.ids, data.id]);
       // Drop a repeated "Jarvis" at the start of the follow-on.
       const rest = textAfterWakeWord(text);
       heard = [heard, rest ?? text].filter(Boolean).join(" ");
     }
     armSilenceTimer(heard ? END_OF_QUESTION_SILENCE : saidYesSir ? NO_QUESTION_TIMEOUT : YES_SIR_DELAY);
-  } else {
+  }
+}
+
+function startQuestion(question) {
+  navigator.vibrate?.(30);
+  heard = question;
+  saidYesSir = false;
+  setState("listening");
+  armSilenceTimer(heard ? END_OF_QUESTION_SILENCE : YES_SIR_DELAY);
+}
+
+// ---------- Learning the user's voice ----------
+
+// Fixing a mishearing: Jarvis remembers the right words, and how that recording sounded.
+let fixing = null;
+
+function openFix() {
+  fixing = { ...shown };
+  ui.fixInput.value = fixing.text;
+  ui.fixForm.hidden = false;
+  ui.fixInput.focus();
+  ui.fixInput.select();
+}
+
+function closeFix() {
+  ui.fixForm.hidden = true;
+  fixing = null;
+}
+
+function saveFix(event) {
+  event.preventDefault();
+  const meant = ui.fixInput.value.trim();
+  const { text, ids } = fixing ?? shown;
+  closeFix();
+  if (!meant || meant === text) return;
+  learnCorrection(text, meant);
+  // A single recording can be remembered by sound, so the same words in the same voice are heard right.
+  if (ids.length === 1) ears?.postMessage({ type: "learn", id: ids[0], text: meant, kind: "phrase" });
+  showHeard(meant, ids);
+  ui.reply.textContent = "Got it, sir. I'll hear that properly next time.";
+  setState(state); // refresh the "Forget" button
+  // If it was meant for Jarvis and he missed it, answer it now.
+  const question = textAfterWakeWord(meant);
+  if (state === "waiting" && question !== null) startQuestion(question);
+}
+
+// "Teach Jarvis my voice": the user says "Jarvis" a few ways, and Jarvis remembers how each sounds.
+const TEACH_PROMPTS = [
+  "Say Jarvis, the way you normally would.",
+  "Now say it quietly.",
+  "Now whisper it.",
+  "Once more, from a little further away.",
+];
+const TEACH_TIMEOUT = 15000;
+let teachStep = -1;
+let teachTimer = null;
+
+async function teach() {
+  teachStep = 0;
+  await promptTeach();
+}
+
+async function promptTeach() {
+  await say(TEACH_PROMPTS[teachStep]);
+  if (state === "off") return;
+  setState("teaching");
+  setStatus(`Learning your voice (${teachStep + 1} of ${TEACH_PROMPTS.length})`);
+  ui.reply.textContent = TEACH_PROMPTS[teachStep];
+  await startMic();
+  clearTimeout(teachTimer);
+  teachTimer = setTimeout(async () => {
+    teachStep = -1;
+    await say("I didn't hear anything, sir. We can try again later.");
+    resumeListening();
+  }, TEACH_TIMEOUT);
+}
+
+async function learnWakeSample({ id }) {
+  clearTimeout(teachTimer);
+  if (teachStep < 0) return;
+  ears.postMessage({ type: "learn", id, text: "jarvis", kind: "wake" });
+  teachStep++;
+  if (teachStep < TEACH_PROMPTS.length) {
+    await promptTeach();
     return;
   }
-  ui.heard.textContent = heard ? `“${heard}”` : "";
+  teachStep = -1;
+  ui.reply.textContent = "";
+  await say("Thank you, sir. I know your voice now.");
+  resumeListening();
+}
+
+function forgetMyVoice() {
+  forgetVoice();
+  ears?.postMessage({ type: "templates", templates: [] });
+  ui.reply.textContent = "I've forgotten everything I learned about your voice, sir.";
+  setState(state);
 }
 
 async function silenceReached() {
@@ -419,16 +608,21 @@ async function think(question, q) {
   if (SEES.test(q)) {
     const frame = grabFrame();
     if (!frame) return "I can't see anything, sir. Allow camera access and keep this page open.";
+    if ((crashes.vision ?? 0) >= 2) {
+      return "I'm sorry, sir. My eyes need more memory than Safari gives me on this phone, so I can't see right now.";
+    }
     if (!models.vision.ready) {
       // The eyes download the first time they're needed, so the brain and ears load faster.
       await say("One moment, sir. Opening my eyes for the first time.");
       setState("thinking");
+      startedLoading("vision");
     }
     try {
       const reply = await brain("vision", { question, ...frame }, [frame.pixels]);
       onProgress("vision", { type: "ready" });
       return reply;
     } catch (error) {
+      finishedLoading();
       if (!models.vision.ready) Object.assign(models.vision, { loaded: 0, total: 0 });
       showDownloadProgress();
       throw error;
@@ -571,12 +765,10 @@ async function wake() {
     setStatus("This browser has no WebGPU, so Jarvis can't think. Update to iOS 26 or later and use Safari.");
     return;
   }
+  // The ears download first, then the brain (see onProgress), so there's only one big download at a time.
   startEarsWorker();
-  startBrain();
-  if (!models.text.ready) {
-    showDownloadProgress();
-    brain("load").catch((e) => (ui.brain.textContent = `Couldn't download the brain: ${e.message}. Reload on Wi-Fi.`));
-  }
+  if (models.ears.ready) loadBrain();
+  showDownloadProgress();
   setState("waiting");
   await startCamera();
   await resumeListening();
@@ -584,6 +776,9 @@ async function wake() {
 
 function goToSleep() {
   clearTimeout(silenceTimer);
+  clearTimeout(teachTimer);
+  teachStep = -1;
+  closeFix();
   stopMic();
   speechSynthesis.cancel();
   wakeLock?.release?.();
@@ -592,6 +787,11 @@ function goToSleep() {
 }
 
 ui.wake.addEventListener("click", wake);
+ui.fix.addEventListener("click", openFix);
+ui.fixForm.addEventListener("submit", saveFix);
+ui.fixCancel.addEventListener("click", closeFix);
+ui.teach.addEventListener("click", teach);
+ui.forget.addEventListener("click", forgetMyVoice);
 // Safari pauses the page in the background; when it comes back, pick up listening again.
 document.addEventListener("visibilitychange", async () => {
   if (document.visibilityState !== "visible" || state === "off") return;
@@ -601,4 +801,5 @@ document.addEventListener("visibilitychange", async () => {
   } catch {}
   if (state === "waiting" || state === "listening") resumeListening();
 });
+if (textChoice === "light") ui.brain.textContent = "Safari ran out of memory last time, so I'll use a lighter brain. Tap Wake Jarvis to carry on.";
 setState("off");
